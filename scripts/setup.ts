@@ -22,7 +22,7 @@ async function main() {
   console.log(`KB_PASSWORD_HASH=${hash}`);
   console.log(`SESSION_SECRET=${secret}`);
   console.log(`PORT=3000`);
-  console.log(`DATABASE_URL=postgres://dtkb:<password>@localhost:5432/dtkb`);
+  console.log(`DATABASE_URL=postgres://dt_workspace:<password>@localhost:5432/dt_workspace`);
   console.log(`NODE_ENV=development`);
 }
 

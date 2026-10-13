@@ -95,7 +95,7 @@ async function main(): Promise<void> {
   }
 
   const server = serve({ fetch: app.fetch, port: config.port, hostname: '0.0.0.0' }, (info) => {
-    console.log(`dt-kb API listening on http://0.0.0.0:${info.port}`);
+    console.log(`dt-workspace API listening on http://0.0.0.0:${info.port}`);
   });
 
   // Graceful shutdown (systemd stop, Ctrl+C, tsx watch restarts): stop taking

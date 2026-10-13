@@ -1,5 +1,5 @@
 /**
- * One-off copy of a dt-kb SQLite database (the pre-Postgres server/data/kb.db)
+ * One-off copy of a dt-workspace SQLite database (the pre-Postgres server/data/kb.db)
  * into the Postgres database named by DATABASE_URL.
  *
  *   npm -w server run db:import-sqlite -- /path/to/kb.db
@@ -39,7 +39,7 @@ interface ColumnSpec {
 interface TableSpec {
   name: string;
   pk: string;
-  /** spaces and pages must exist in any dt-kb database; the others came later. */
+  /** spaces and pages must exist in any dt-workspace database; the others came later. */
   required: boolean;
   columns: ColumnSpec[];
 }
@@ -206,7 +206,7 @@ async function main(): Promise<void> {
     for (const spec of TABLES) {
       if (!sourceTables.has(spec.name)) {
         if (spec.required) {
-          throw new ImportError(`${sqlitePath} has no ${spec.name} table — is it a dt-kb database?`);
+          throw new ImportError(`${sqlitePath} has no ${spec.name} table — is it a dt-workspace database?`);
         }
         data.set(spec.name, []);
         continue;

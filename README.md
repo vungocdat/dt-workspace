@@ -56,8 +56,8 @@ The app has three top-level tabs in the sidebar — **Knowledge base**, **Calend
 ### Installation
 
 ```sh
-git clone https://github.com/vungocdat/dt-kb.git
-cd dt-kb
+git clone https://github.com/vungocdat/dt-workspace.git
+cd dt-workspace
 npm install
 ```
 
@@ -66,8 +66,8 @@ npm install
 Create a role and a database for the app (on macOS with Homebrew, `psql -d postgres` connects as a superuser; on Ubuntu use `sudo -u postgres psql`):
 
 ```sql
-CREATE ROLE dtkb LOGIN PASSWORD 'choose-a-password';
-CREATE DATABASE dtkb OWNER dtkb ENCODING 'UTF8' TEMPLATE template0;
+CREATE ROLE dt_workspace LOGIN PASSWORD 'choose-a-password';
+CREATE DATABASE dt_workspace OWNER dt_workspace ENCODING 'UTF8' TEMPLATE template0;
 ```
 
 The app doesn't need superuser rights: as the database owner it creates its own tables, the `unaccent` extension (a trusted extension) and its search configuration on first start. How the app finds this database, and what to do when it can't, is in [Connecting to PostgreSQL](#connecting-to-postgresql).
@@ -93,7 +93,7 @@ KB_USERNAME=admin
 KB_PASSWORD_HASH=$2b$12$...
 SESSION_SECRET=<32-char random string>
 PORT=3333
-DATABASE_URL=postgres://dtkb:choose-a-password@localhost:5432/dtkb
+DATABASE_URL=postgres://dt_workspace:choose-a-password@localhost:5432/dt_workspace
 NODE_ENV=development
 ```
 
@@ -129,17 +129,17 @@ postgres://USER:PASSWORD@HOST:PORT/DATABASE
 
 | Part | Value with the setup in this guide |
 |------|-----------------------------------|
-| `USER` | `dtkb` — the role you created |
+| `USER` | `dt_workspace` — the role you created |
 | `PASSWORD` | that role's password; URL-encode `@ : / # ? %` if it contains them (e.g. `@` → `%40`), or pick a password without them (`openssl rand -hex 24`) |
 | `HOST` | `localhost` when PostgreSQL runs on the same machine |
 | `PORT` | `5432`, PostgreSQL's default |
-| `DATABASE` | `dtkb` — the database you created |
+| `DATABASE` | `dt_workspace` — the database you created |
 
-**Same machine, over TCP (recommended).** `postgres://dtkb:your-db-password@localhost:5432/dtkb`. Works out of the box on Ubuntu and Homebrew. PostgreSQL only listens on `localhost` by default, so nothing extra is exposed; keep port 5432 closed in the firewall.
+**Same machine, over TCP (recommended).** `postgres://dt_workspace:your-db-password@localhost:5432/dt_workspace`. Works out of the box on Ubuntu and Homebrew. PostgreSQL only listens on `localhost` by default, so nothing extra is exposed; keep port 5432 closed in the firewall.
 
-**Same machine, over the Unix socket.** Put the socket directory in a `host` parameter and leave the host part empty: `postgres://dtkb:your-db-password@/dtkb?host=/var/run/postgresql` on Ubuntu (`?host=/tmp` with Homebrew). Ubuntu authenticates socket connections with `peer` by default, which only lets the OS user `dtkb` log in as role `dtkb` — the app runs as your login user, so this fails with *Peer authentication failed* unless you change `pg_hba.conf`. Use `localhost` unless you have a reason not to.
+**Same machine, over the Unix socket.** Put the socket directory in a `host` parameter and leave the host part empty: `postgres://dt_workspace:your-db-password@/dt_workspace?host=/var/run/postgresql` on Ubuntu (`?host=/tmp` with Homebrew). Ubuntu authenticates socket connections with `peer` by default, which only lets the OS user `dt_workspace` log in as role `dt_workspace` — the app runs as your login user, so this fails with *Peer authentication failed* unless you change `pg_hba.conf`. Use `localhost` unless you have a reason not to.
 
-**Sharing a PostgreSQL server with other apps** (Vaultwarden, …) is fine: give dt-kb its own role and database as shown above. The app only ever touches its own database and needs no rights beyond owning it — it creates its tables, the `unaccent` extension and its search configuration itself.
+**Sharing a PostgreSQL server with other apps** (Vaultwarden, …) is fine: give dt-workspace its own role and database as shown above. The app only ever touches its own database and needs no rights beyond owning it — it creates its tables, the `unaccent` extension and its search configuration itself.
 
 **PostgreSQL on another machine** works too, but then you must make PostgreSQL listen on the network (`listen_addresses`), allow the app's IP in `pg_hba.conf`, open port 5432 to that IP only, and encrypt the connection with TLS (`?sslmode=…` in the URL). The rest of this guide assumes the same machine.
 
@@ -151,7 +151,7 @@ Test the exact URL from `.env` with `psql` before starting the app (run from the
 psql "$(grep '^DATABASE_URL=' .env | cut -d= -f2-)" -c 'select current_user, current_database();'
 ```
 
-You should see `dtkb | dtkb`. Then start the app (`npm run dev`, or `node server/dist/index.js` in production); `dt-kb API listening on …` means it connected and migrated. After the first start the database has its tables:
+You should see `dt_workspace | dt_workspace`. Then start the app (`npm run dev`, or `node server/dist/index.js` in production); `dt-workspace API listening on …` means it connected and migrated. After the first start the database has its tables:
 
 ```sh
 psql "$(grep '^DATABASE_URL=' .env | cut -d= -f2-)" -c '\dt'
@@ -161,38 +161,38 @@ lists `spaces`, `pages`, `calendar_notes`, `todos` and `__drizzle_migrations` (t
 
 ### Troubleshooting the connection
 
-The server prints the reason after `Failed to start server:`. On a production server it lands in the journal: `journalctl -u dt-kb -n 50`.
+The server prints the reason after `Failed to start server:`. On a production server it lands in the journal: `journalctl -u dt-workspace -n 50`.
 
 | Message | Cause | Fix |
 |---------|-------|-----|
 | `DATABASE_URL is required` | No `DATABASE_URL` line in `.env` | Add it to the `.env` in the repository root (not `server/.env`) |
 | `DATABASE_URL must be a postgres:// or postgresql:// connection URL` | Typo in the scheme, or an old `mysql://`/file path | Use the format above |
 | `connect ECONNREFUSED 127.0.0.1:5432` (or `::1:5432`) | PostgreSQL isn't running, or listens on another port | Ubuntu: `systemctl status postgresql`, and `pg_lsclusters` shows each cluster's port. macOS: `brew services list` |
-| `password authentication failed for user "dtkb"` | Wrong password, or special characters not URL-encoded | Fix the URL, or set a new password (below) |
-| `role "dtkb" does not exist` / `database "dtkb" does not exist` | Not created yet, or a typo in the URL | Create them as in [Database](#database) |
-| `permission denied for schema public` / `permission denied to create extension "unaccent"` | The database isn't owned by `dtkb` (e.g. created without `OWNER dtkb`) | As a superuser: `ALTER DATABASE dtkb OWNER TO dtkb;` |
+| `password authentication failed for user "dt_workspace"` | Wrong password, or special characters not URL-encoded | Fix the URL, or set a new password (below) |
+| `role "dt_workspace" does not exist` / `database "dt_workspace" does not exist` | Not created yet, or a typo in the URL | Create them as in [Database](#database) |
+| `permission denied for schema public` / `permission denied to create extension "unaccent"` | The database isn't owned by `dt_workspace` (e.g. created without `OWNER dt_workspace`) | As a superuser: `ALTER DATABASE dt_workspace OWNER TO dt_workspace;` |
 | `extension "unaccent" is not available` | The PostgreSQL contrib modules aren't installed | Ubuntu: `sudo apt install postgresql-contrib` |
-| `Peer authentication failed for user "dtkb"` | Connecting over the Unix socket | Use `localhost` in the URL |
+| `Peer authentication failed for user "dt_workspace"` | Connecting over the Unix socket | Use `localhost` in the URL |
 
 ### Changing the database password
 
 ```sh
-sudo -u postgres psql -c "ALTER ROLE dtkb PASSWORD 'new-password';"   # macOS: psql -d postgres -c "…"
+sudo -u postgres psql -c "ALTER ROLE dt_workspace PASSWORD 'new-password';"   # macOS: psql -d postgres -c "…"
 ```
 
-Then update the password in `DATABASE_URL` in `.env` (and in `~/.pgpass` if you set up [backups](#7-backups)) and restart the app (`sudo systemctl restart dt-kb`).
+Then update the password in `DATABASE_URL` in `.env` (and in `~/.pgpass` if you set up [backups](#7-backups)) and restart the app (`sudo systemctl restart dt-workspace`).
 
 ## Production Deployment
 
-A step-by-step setup for a fresh Ubuntu server, ending with an empty database. The app runs as your normal login user (`youruser` below) from `/opt/dt-kb`, with PostgreSQL on the same host. Moving an existing SQLite install over? Follow [Migrating from SQLite](#migrating-from-sqlite) instead.
+A step-by-step setup for a fresh Ubuntu server, ending with an empty database. The app runs as your normal login user (`youruser` below) from `/opt/dt-workspace`, with PostgreSQL on the same host. Moving an existing SQLite install over? Follow [Migrating from SQLite](#migrating-from-sqlite) instead.
 
 ### 0. PostgreSQL
 
 ```sh
 sudo apt install -y postgresql            # skip if PostgreSQL is already running
 sudo -u postgres psql <<'SQL'
-CREATE ROLE dtkb LOGIN PASSWORD 'your-db-password';
-CREATE DATABASE dtkb OWNER dtkb ENCODING 'UTF8' TEMPLATE template0;
+CREATE ROLE dt_workspace LOGIN PASSWORD 'your-db-password';
+CREATE DATABASE dt_workspace OWNER dt_workspace ENCODING 'UTF8' TEMPLATE template0;
 SQL
 ```
 
@@ -201,9 +201,9 @@ Ubuntu's default `pg_hba.conf` already allows password logins over `localhost`, 
 ### 1. Clone and install
 
 ```sh
-sudo mkdir /opt/dt-kb && sudo chown $USER:$USER /opt/dt-kb
-git clone https://github.com/vungocdat/dt-kb.git /opt/dt-kb
-cd /opt/dt-kb
+sudo mkdir /opt/dt-workspace && sudo chown $USER:$USER /opt/dt-workspace
+git clone https://github.com/vungocdat/dt-workspace.git /opt/dt-workspace
+cd /opt/dt-workspace
 node -v          # must be v22.x
 npm install      # includes the build tools needed below
 ```
@@ -215,14 +215,14 @@ npm install      # includes the build tools needed below
 npm run setup -- --username admin --password 'your-strong-password'
 ```
 
-Quote the password so the shell leaves special characters alone. Put the printed values in `/opt/dt-kb/.env`, changing the last three lines for production:
+Quote the password so the shell leaves special characters alone. Put the printed values in `/opt/dt-workspace/.env`, changing the last three lines for production:
 
 ```env
 KB_USERNAME=admin
 KB_PASSWORD_HASH=$2b$12$...        # from setup output
 SESSION_SECRET=...                 # from setup output (32 chars)
 PORT=3000
-DATABASE_URL=postgres://dtkb:your-db-password@localhost:5432/dtkb
+DATABASE_URL=postgres://dt_workspace:your-db-password@localhost:5432/dt_workspace
 NODE_ENV=production
 ```
 
@@ -239,22 +239,22 @@ npm run build
 node server/dist/index.js
 ```
 
-You should see `dt-kb API listening on http://0.0.0.0:3000`, and the `dtkb` database now has its tables. Stop it with Ctrl+C. (No `db:migrate` — the server migrates its own database on startup.)
+You should see `dt-workspace API listening on http://0.0.0.0:3000`, and the `dt_workspace` database now has its tables. Stop it with Ctrl+C. (No `db:migrate` — the server migrates its own database on startup.)
 
 ### 4. systemd
 
-Create `/etc/systemd/system/dt-kb.service`:
+Create `/etc/systemd/system/dt-workspace.service`:
 
 ```ini
 [Unit]
-Description=dt-kb
+Description=dt-workspace
 After=network.target postgresql.service
 Wants=postgresql.service
 
 [Service]
 Type=simple
 User=youruser
-WorkingDirectory=/opt/dt-kb
+WorkingDirectory=/opt/dt-workspace
 ExecStart=/usr/bin/node server/dist/index.js
 Restart=on-failure
 
@@ -266,8 +266,8 @@ No `EnvironmentFile=` is needed — the app loads `.env` itself. Use the path fr
 
 ```sh
 sudo systemctl daemon-reload
-sudo systemctl enable --now dt-kb
-systemctl status dt-kb             # active (running)
+sudo systemctl enable --now dt-workspace
+systemctl status dt-workspace             # active (running)
 ```
 
 ### 5. HTTPS reverse proxy (nginx)
@@ -285,7 +285,7 @@ Two details in both configs below matter:
 sudo apt install -y nginx certbot python3-certbot-nginx
 ```
 
-Create `/etc/nginx/sites-available/dt-kb`:
+Create `/etc/nginx/sites-available/dt-workspace`:
 
 ```nginx
 server {
@@ -306,7 +306,7 @@ server {
 Enable it, then let certbot add the certificate, the HTTPS `server` block and the HTTP→HTTPS redirect (port 80 must be reachable from the internet for the challenge — open the firewall in step 6 first):
 
 ```sh
-sudo ln -s /etc/nginx/sites-available/dt-kb /etc/nginx/sites-enabled/
+sudo ln -s /etc/nginx/sites-available/dt-workspace /etc/nginx/sites-enabled/
 sudo rm -f /etc/nginx/sites-enabled/default
 sudo nginx -t && sudo systemctl reload nginx
 sudo certbot --nginx -d kb.example.com
@@ -319,11 +319,11 @@ Certbot installs a timer that renews the certificate automatically (`sudo certbo
 ```sh
 sudo apt install -y nginx
 sudo openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
-  -keyout /etc/ssl/private/dt-kb.key -out /etc/ssl/certs/dt-kb.crt \
+  -keyout /etc/ssl/private/dt-workspace.key -out /etc/ssl/certs/dt-workspace.crt \
   -subj "/CN=192.168.1.50" -addext "subjectAltName=IP:192.168.1.50"
 ```
 
-Replace `192.168.1.50` with the server's IP. Create `/etc/nginx/sites-available/dt-kb`:
+Replace `192.168.1.50` with the server's IP. Create `/etc/nginx/sites-available/dt-workspace`:
 
 ```nginx
 server {
@@ -336,8 +336,8 @@ server {
     listen 443 ssl;
     server_name _;
 
-    ssl_certificate     /etc/ssl/certs/dt-kb.crt;
-    ssl_certificate_key /etc/ssl/private/dt-kb.key;
+    ssl_certificate     /etc/ssl/certs/dt-workspace.crt;
+    ssl_certificate_key /etc/ssl/private/dt-workspace.key;
 
     client_max_body_size 50m;
 
@@ -351,12 +351,12 @@ server {
 ```
 
 ```sh
-sudo ln -s /etc/nginx/sites-available/dt-kb /etc/nginx/sites-enabled/
+sudo ln -s /etc/nginx/sites-available/dt-workspace /etc/nginx/sites-enabled/
 sudo rm -f /etc/nginx/sites-enabled/default
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
-The browser warns about the self-signed certificate once; accept it (or import `dt-kb.crt` into your OS/browser trust store to silence it).
+The browser warns about the self-signed certificate once; accept it (or import `dt-workspace.crt` into your OS/browser trust store to silence it).
 
 ### 6. Firewall
 
@@ -372,62 +372,64 @@ Then open your `https://` address and log in with the credentials from step 2.
 
 ### 7. Backups
 
-See [Data](#data) below — back up the `dtkb` database and `.env`. Give `pg_dump` the password through `~/.pgpass` (create `~/kb-backups` first):
+See [Data](#data) below — back up the `dt_workspace` database and `.env`. Give `pg_dump` the password through `~/.pgpass` (create `~/dt-workspace-backups` first):
 
 ```sh
-echo 'localhost:5432:dtkb:dtkb:your-db-password' >> ~/.pgpass
+echo 'localhost:5432:dt_workspace:dt_workspace:your-db-password' >> ~/.pgpass
 chmod 600 ~/.pgpass
 ```
 
 Then add a nightly dump to `crontab -e`:
 
 ```
-0 3 * * * pg_dump -Fc -h localhost -U dtkb dtkb > /home/youruser/kb-backups/kb-$(date +\%F).dump
+0 3 * * * pg_dump -Fc -h localhost -U dt_workspace dt_workspace > /home/youruser/dt-workspace-backups/dt-workspace-$(date +\%F).dump
 ```
 
-Restore one into an existing `dtkb` database with `pg_restore --clean --if-exists -h localhost -U dtkb -d dtkb kb-YYYY-MM-DD.dump`.
+Restore one into an existing `dt_workspace` database with `pg_restore --clean --if-exists -h localhost -U dt_workspace -d dt_workspace dt-workspace-YYYY-MM-DD.dump`.
 
 ## Updating
 
 ```sh
-cd /opt/dt-kb
+cd /opt/dt-workspace
 git pull origin main
 npm install            # only needed if dependencies changed
 npm run build
-sudo systemctl restart dt-kb
+sudo systemctl restart dt-workspace
 ```
 
 The database is untouched by these steps; any new migrations are applied by the server when it restarts. All four commands are idempotent — safe to run every time without checking what changed.
 
 ## Migrating from SQLite
 
-Versions before the PostgreSQL switch kept all data in one SQLite file, `server/data/kb.db` (or wherever `DB_PATH` in `.env` pointed). This section moves an existing install to PostgreSQL. It assumes the setup from [Production Deployment](#production-deployment): the app in `/opt/dt-kb`, running as the `dt-kb` systemd service. The app is down only between steps 2 and 6, a few minutes.
+Versions before the PostgreSQL switch kept all data in one SQLite file, `server/data/kb.db` (or wherever `DB_PATH` in `.env` pointed). This section moves an existing install to PostgreSQL. It assumes the setup from [Production Deployment](#production-deployment): the app in `/opt/dt-workspace`, running as the `dt-workspace` systemd service.
+
+> **Installed before the project was renamed** from dt-kb to dt-workspace? Then your app lives in `/opt/dt-kb` and runs as `dt-kb.service` — use those names wherever the commands below say `/opt/dt-workspace` and `dt-workspace`. The PostgreSQL role and database are new, so create them as `dt_workspace` as shown. The old GitHub URL still redirects; to point the clone at the new one: `git remote set-url origin https://github.com/vungocdat/dt-workspace.git`. The app is down only between steps 2 and 6, a few minutes.
 
 **What moves:** spaces, pages, calendar notes and to-do tasks, unchanged — ids, timestamps, sort order, emoji and rendered HTML included.
 **What doesn't need to:** your login (credentials and session secret stay in `.env`, so you even stay signed in) and the tab order / default page (stored in the browser).
 
 ### 1. Create the database
 
-PostgreSQL keeps running for its other users (e.g. Vaultwarden); dt-kb gets its own role and database. If PostgreSQL isn't installed yet, do [step 0 of Production Deployment](#0-postgresql) instead.
+PostgreSQL keeps running for its other users (e.g. Vaultwarden); dt-workspace gets its own role and database. If PostgreSQL isn't installed yet, do [step 0 of Production Deployment](#0-postgresql) instead.
 
 ```sh
 sudo -u postgres psql <<'SQL'
-CREATE ROLE dtkb LOGIN PASSWORD 'your-db-password';
-CREATE DATABASE dtkb OWNER dtkb ENCODING 'UTF8' TEMPLATE template0;
+CREATE ROLE dt_workspace LOGIN PASSWORD 'your-db-password';
+CREATE DATABASE dt_workspace OWNER dt_workspace ENCODING 'UTF8' TEMPLATE template0;
 SQL
-psql 'postgres://dtkb:your-db-password@localhost:5432/dtkb' -c 'select current_user, current_database();'
+psql 'postgres://dt_workspace:your-db-password@localhost:5432/dt_workspace' -c 'select current_user, current_database();'
 ```
 
-The last command must print `dtkb | dtkb`; if it doesn't, see [Troubleshooting the connection](#troubleshooting-the-connection). The app keeps running on SQLite meanwhile.
+The last command must print `dt_workspace | dt_workspace`; if it doesn't, see [Troubleshooting the connection](#troubleshooting-the-connection). The app keeps running on SQLite meanwhile.
 
 ### 2. Stop the app and keep a rollback copy
 
 ```sh
-cd /opt/dt-kb
-sudo systemctl stop dt-kb
-mkdir -p ~/kb-before-postgres
-cp server/data/kb.db* .env ~/kb-before-postgres/     # database (+ any -wal/-shm files) and .env
-git rev-parse HEAD > ~/kb-before-postgres/commit      # the version to return to if needed
+cd /opt/dt-workspace
+sudo systemctl stop dt-workspace
+mkdir -p ~/dt-workspace-before-postgres
+cp server/data/kb.db* .env ~/dt-workspace-before-postgres/     # database (+ any -wal/-shm files) and .env
+git rev-parse HEAD > ~/dt-workspace-before-postgres/commit      # the version to return to if needed
 ```
 
 Stopping first matters: nothing can write to the SQLite file while it is copied. Copy the `-wal`/`-shm` files too if they exist — recent writes may still be in them, and the import reads them.
@@ -444,10 +446,10 @@ npm run build
 
 ### 4. Point `.env` at PostgreSQL
 
-Edit `/opt/dt-kb/.env`: delete the `DB_PATH=…` line (if there is one) and add
+Edit `/opt/dt-workspace/.env`: delete the `DB_PATH=…` line (if there is one) and add
 
 ```env
-DATABASE_URL=postgres://dtkb:your-db-password@localhost:5432/dtkb
+DATABASE_URL=postgres://dt_workspace:your-db-password@localhost:5432/dt_workspace
 ```
 
 Leave every other line as it is.
@@ -463,8 +465,8 @@ npm -w server run db:import-sqlite -- server/data/kb.db
 The script creates the tables, copies everything in a single transaction and then checks that each table's row count and a checksum of its contents match the SQLite source. Success looks like this:
 
 ```
-Imported /opt/dt-kb/server/data/kb.db
-into Postgres database "dtkb":
+Imported /opt/dt-workspace/server/data/kb.db
+into Postgres database "dt_workspace":
   spaces              3 rows   sha256 8107613f7f44
   pages              14 rows   sha256 7fab92e3677d
   calendar_notes      6 rows   sha256 e9f8c96e9bc6
@@ -476,7 +478,7 @@ The script never writes to the SQLite file. If anything goes wrong it rolls back
 
 | Message | Meaning |
 |---------|---------|
-| `Refusing to import: database "dtkb" already has data in …` | The import already ran (or the app was started on PostgreSQL and content was created). If the import already succeeded there is nothing to do. To start over, recreate the empty database: `sudo -u postgres psql -c 'DROP DATABASE dtkb;'`, then the `CREATE DATABASE` line from step 1 |
+| `Refusing to import: database "dt_workspace" already has data in …` | The import already ran (or the app was started on PostgreSQL and content was created). If the import already succeeded there is nothing to do. To start over, recreate the empty database: `sudo -u postgres psql -c 'DROP DATABASE dt_workspace;'`, then the `CREATE DATABASE` line from step 1 |
 | `No such file: …` | Wrong path to `kb.db` |
 | `Usage: npm -w server run db:import-sqlite -- /path/to/kb.db` | The path is missing — mind the `--` before it |
 | A connection error (`ECONNREFUSED`, `password authentication failed`, …) | `DATABASE_URL` is wrong — see [Troubleshooting the connection](#troubleshooting-the-connection) |
@@ -484,8 +486,8 @@ The script never writes to the SQLite file. If anything goes wrong it rolls back
 ### 6. Start and check
 
 ```sh
-sudo systemctl start dt-kb
-journalctl -u dt-kb -n 20       # should end with: dt-kb API listening on http://0.0.0.0:3000
+sudo systemctl start dt-workspace
+journalctl -u dt-workspace -n 20       # should end with: dt-workspace API listening on http://0.0.0.0:3000
 ```
 
 Open the app and check that your spaces and pages are there, that search finds something (try a word without its diacritics — search now ignores them), and that the calendar notes and to-dos are back.
@@ -493,19 +495,19 @@ Open the app and check that your spaces and pages are there, that search finds s
 ### 7. Afterwards
 
 - **Backups:** set up the nightly `pg_dump` from [Backups](#7-backups), and remove the old `sqlite3 … .backup` line from `crontab -e` — `kb.db` no longer changes.
-- **The old SQLite file:** the app no longer reads `server/data/kb.db`. Keep it and `~/kb-before-postgres/` until you're confident everything is fine, then delete them.
+- **The old SQLite file:** the app no longer reads `server/data/kb.db`. Keep it and `~/dt-workspace-before-postgres/` until you're confident everything is fine, then delete them.
 
 ### Rolling back
 
 If something is wrong after the switch:
 
 ```sh
-cd /opt/dt-kb
-sudo systemctl stop dt-kb
-git checkout "$(cat ~/kb-before-postgres/commit)"
-cp ~/kb-before-postgres/.env .env
+cd /opt/dt-workspace
+sudo systemctl stop dt-workspace
+git checkout "$(cat ~/dt-workspace-before-postgres/commit)"
+cp ~/dt-workspace-before-postgres/.env .env
 npm install && npm run build
-sudo systemctl start dt-kb
+sudo systemctl start dt-workspace
 ```
 
 This runs the old version on the untouched `server/data/kb.db` again, with `.env` as it was before the switch (so a username or password changed in Settings since then is undone too). Anything written after the switch exists only in PostgreSQL and is lost on rollback. The checkout leaves the repository on a detached commit; `git checkout main` returns to the current version when you try again.

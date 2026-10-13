@@ -1,5 +1,5 @@
 {
-  "name": "dt-kb",
+  "name": "dt-workspace",
   "private": true,
   "workspaces": ["server", "client"],
   "scripts": {

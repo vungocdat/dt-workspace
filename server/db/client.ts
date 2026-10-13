@@ -17,7 +17,7 @@ const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) {
   // loadConfig() in lib/env.ts reports this first on a normal start; this guard
   // covers scripts that import the client directly.
-  throw new Error('DATABASE_URL is required (e.g. postgres://dtkb:<password>@localhost:5432/dtkb)');
+  throw new Error('DATABASE_URL is required (e.g. postgres://dt_workspace:<password>@localhost:5432/dt_workspace)');
 }
 
 /**

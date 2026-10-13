@@ -34,7 +34,7 @@ export function loadConfig(): AppConfig {
     errors.push(`SESSION_SECRET must be exactly 32 characters (got ${sessionSecret.length})`);
   }
   if (!databaseUrl) {
-    errors.push('DATABASE_URL is required (e.g. postgres://dtkb:<password>@localhost:5432/dtkb)');
+    errors.push('DATABASE_URL is required (e.g. postgres://dt_workspace:<password>@localhost:5432/dt_workspace)');
   } else if (!/^postgres(ql)?:\/\//.test(databaseUrl)) {
     errors.push('DATABASE_URL must be a postgres:// or postgresql:// connection URL');
   }
