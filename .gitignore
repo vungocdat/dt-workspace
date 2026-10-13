@@ -9,3 +9,8 @@ server/public/
 .DS_Store
 .claude/
 CLAUDE.md
+
+# Database backups and dumps
+*.tar.gz
+*.sql.gz
+*.dump
