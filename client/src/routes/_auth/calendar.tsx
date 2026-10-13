@@ -11,6 +11,7 @@ import MarkdownEditor from '../../components/editor/MarkdownEditor'
 import { MarkdownRenderer } from '../../components/editor/MarkdownRenderer'
 import { Skeleton } from '../../components/ui/Skeleton'
 import { lunarFor, lunarMonthSpan, type LunarDay } from '../../lib/lunar'
+import { czechHoliday } from '../../lib/czechHolidays'
 import { useUIStore } from '../../store'
 import { useDocumentTitle } from '../../lib/title'
 import { shortcut } from '../../lib/platform'
@@ -108,6 +109,7 @@ function Calendar() {
     [view],
   )
   const selectedLunar = lunarFor(selected)
+  const selectedHoliday = czechHoliday(selected)
   const cellRefs = useRef(new Map<string, HTMLButtonElement>())
   // Set when arrow-key nav crosses a month boundary: the destination button
   // doesn't exist until the new view renders, so focus is handed over below.
@@ -318,6 +320,7 @@ function Calendar() {
             const isSelected = iso === selected
             const hasNote = noteDates.has(iso)
             const lunar = lunarFor(iso)
+            const holiday = czechHoliday(iso)
 
             return (
               <button
@@ -327,8 +330,15 @@ function Calendar() {
                   else cellRefs.current.delete(iso)
                 }}
                 onClick={() => selectDate(cell)}
-                aria-label={`${formatLongDate(iso)}, ${lunar.full}`}
-                title={[lunar.full, lunar.festivalFull, lunar.tietKhi].filter(Boolean).join(' · ')}
+                aria-label={[formatLongDate(iso), holiday?.name, lunar.full].filter(Boolean).join(', ')}
+                title={[
+                  holiday && `${holiday.name} (${holiday.nameCs})`,
+                  lunar.full,
+                  lunar.festivalFull,
+                  lunar.tietKhi,
+                ]
+                  .filter(Boolean)
+                  .join(' · ')}
                 aria-current={isToday ? 'date' : undefined}
                 aria-pressed={isSelected}
                 className={`h-full w-full min-h-0 min-w-0 px-0.5 flex flex-col items-center justify-center gap-0.5 2xl:gap-1 rounded-md border transition-colors focus:outline-none focus:ring-1 focus:ring-blue-500 ${
@@ -343,6 +353,8 @@ function Calendar() {
                   className={`text-xs 2xl:text-sm leading-5 w-5 h-5 2xl:w-7 2xl:h-7 flex items-center justify-center rounded-full ${
                     isToday
                       ? 'bg-blue-600 text-gray-50 font-semibold'
+                      : holiday
+                      ? `text-red-400 font-semibold ${inMonth ? '' : 'opacity-50'}`
                       : inMonth
                       ? 'text-gray-300'
                       : 'text-gray-600'
@@ -391,6 +403,11 @@ function Calendar() {
                 <span className="text-emerald-400/80"> · {selectedLunar.tietKhi}</span>
               )}
             </p>
+            {selectedHoliday && (
+              <p className="text-xs text-red-400" title={selectedHoliday.nameCs}>
+                Czech public holiday: {selectedHoliday.name}
+              </p>
+            )}
           </div>
           <div className="flex-1" />
 
