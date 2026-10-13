@@ -100,11 +100,16 @@ async function apiFetch<T>(
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
+// login uses a raw fetch too: a 401 here means wrong credentials, which the
+// login page must show — apiFetch would reload /login and swallow the error.
 export async function login(username: string, password: string): Promise<void> {
-  await apiFetch<void>('/api/auth/login', {
+  const res = await fetch('/api/auth/login', {
     method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
     body: JSON.stringify({ username, password }),
   })
+  if (!res.ok) throw new Error(`API ${res.status}`)
 }
 
 export async function logout(): Promise<void> {
