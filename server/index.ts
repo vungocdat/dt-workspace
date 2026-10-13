@@ -8,7 +8,7 @@ import { dirname, join, resolve } from 'node:path';
 let serverDir = dirname(fileURLToPath(import.meta.url));
 while (!existsSync(join(serverDir, 'package.json'))) serverDir = dirname(serverDir);
 
-// Relative paths (DB_PATH, ./public, ./db/migrations) are resolved against the
+// Relative paths (./public, ./db/migrations) are resolved against the
 // working directory; pin it to server/ so `npm start` from the repo root, a
 // systemd unit, etc. all behave exactly like `npm run dev`.
 process.chdir(serverDir);
@@ -28,20 +28,23 @@ import { loadConfig } from './lib/env.js';
 
 /**
  * Bootstrap order is load-bearing:
- *   1. loadConfig()        — fail fast on bad env BEFORE anything reads it.
- *   2. runMigrations + initializeDb — base tables, then FTS + triggers + PRAGMAs.
- *   3. dynamic import of routes — their module-level prepared statements compile
- *      against an already-initialized schema (FTS table must exist first).
+ *   1. loadConfig()     — fail fast on bad env BEFORE anything reads it.
+ *   2. runMigrations()  — bring the Postgres schema up to date before serving.
+ *   3. dynamic import of db/client and routes.
  *
- * Routes are imported dynamically (not top-level) precisely so the DB is ready
- * before search.ts / pages.ts prepare statements at module load.
+ * Why dynamic imports: ESM hoists static imports above the loadEnv() call at
+ * the top of this file, and several modules read process.env at module load —
+ * db/client.ts (DATABASE_URL, to build the pool), lib/session.ts
+ * (SESSION_SECRET, validated on load), routes/auth.ts (credentials). Importing
+ * them only after .env is loaded and validated keeps that working. No module
+ * queries the database at load time; migrations just have to finish before
+ * the server starts accepting requests.
  */
 async function main(): Promise<void> {
   const config = loadConfig();
 
-  const { runMigrations, initializeDb } = await import('./db/client.js');
-  runMigrations();
-  initializeDb();
+  const { pool, runMigrations } = await import('./db/client.js');
+  await runMigrations();
 
   const { authRouter } = await import('./routes/auth.js');
   const { spacesRouter } = await import('./routes/spaces.js');
@@ -67,7 +70,7 @@ async function main(): Promise<void> {
 
   app.route('/api', api);
 
-  // Centralized error handler — never leak internal/SQLite error text.
+  // Centralized error handler — never leak internal/database error text.
   app.onError((err, c) => {
     if (err instanceof HTTPException) {
       return c.json({ error: err.message }, err.status);
@@ -91,9 +94,31 @@ async function main(): Promise<void> {
     app.notFound((c) => c.json({ error: 'Not found' }, 404));
   }
 
-  serve({ fetch: app.fetch, port: config.port, hostname: '0.0.0.0' }, (info) => {
+  const server = serve({ fetch: app.fetch, port: config.port, hostname: '0.0.0.0' }, (info) => {
     console.log(`dt-kb API listening on http://0.0.0.0:${info.port}`);
   });
+
+  // Graceful shutdown (systemd stop, Ctrl+C, tsx watch restarts): stop taking
+  // connections, then close the pool so Postgres sees clean disconnects rather
+  // than dropped sockets. A timer forces the exit if a keep-alive socket or a
+  // stuck query holds things open.
+  let shuttingDown = false;
+  const shutdown = (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`${signal} received, shutting down`);
+    setTimeout(() => process.exit(1), 5000).unref();
+    server.close();
+    pool.end().then(
+      () => process.exit(0),
+      (err: unknown) => {
+        console.error('[db] error closing pool:', err);
+        process.exit(1);
+      },
+    );
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
 main().catch((err) => {

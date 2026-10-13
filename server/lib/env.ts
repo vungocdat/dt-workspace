@@ -12,7 +12,7 @@ export interface AppConfig {
   passwordHash: string;
   sessionSecret: string;
   port: number;
-  dbPath: string;
+  databaseUrl: string;
   isProduction: boolean;
 }
 
@@ -22,6 +22,7 @@ export function loadConfig(): AppConfig {
   const username = process.env.KB_USERNAME ?? '';
   const passwordHash = process.env.KB_PASSWORD_HASH ?? '';
   const sessionSecret = process.env.SESSION_SECRET ?? '';
+  const databaseUrl = process.env.DATABASE_URL ?? '';
 
   if (!username) errors.push('KB_USERNAME is required');
   if (!passwordHash) {
@@ -31,6 +32,11 @@ export function loadConfig(): AppConfig {
   }
   if (sessionSecret.length !== 32) {
     errors.push(`SESSION_SECRET must be exactly 32 characters (got ${sessionSecret.length})`);
+  }
+  if (!databaseUrl) {
+    errors.push('DATABASE_URL is required (e.g. postgres://dtkb:<password>@localhost:5432/dtkb)');
+  } else if (!/^postgres(ql)?:\/\//.test(databaseUrl)) {
+    errors.push('DATABASE_URL must be a postgres:// or postgresql:// connection URL');
   }
 
   if (errors.length > 0) {
@@ -42,7 +48,7 @@ export function loadConfig(): AppConfig {
     passwordHash,
     sessionSecret,
     port: Number(process.env.PORT ?? 3000),
-    dbPath: process.env.DB_PATH ?? './data/kb.db',
+    databaseUrl,
     isProduction: process.env.NODE_ENV === 'production',
   };
 }

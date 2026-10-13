@@ -6,18 +6,19 @@
     "dev": "tsx watch index.ts",
     "build": "tsc",
     "db:generate": "drizzle-kit generate --config drizzle.config.cjs",
-    "db:migrate": "drizzle-kit push --config drizzle.config.cjs"
+    "db:migrate": "drizzle-kit migrate --config drizzle.config.cjs",
+    "db:import-sqlite": "tsx scripts/import-sqlite.ts"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.0",
     "@hono/zod-validator": "^0.4.0",
     "bcryptjs": "^2.4.3",
-    "better-sqlite3": "^11.0.0",
     "dotenv": "^16.0.0",
     "drizzle-orm": "^0.36.0",
     "hono": "^4.6.0",
     "iron-session": "^8.0.0",
     "jszip": "^3.10.1",
+    "pg": "^8.16.0",
     "rehype-highlight": "^7.0.0",
     "rehype-stringify": "^10.0.0",
     "remark-emoji": "^5.0.2",
@@ -30,8 +31,8 @@
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
-    "@types/better-sqlite3": "^7.6.11",
     "@types/node": "^22.0.0",
+    "@types/pg": "^8.15.0",
     "@types/uuid": "^10.0.0",
     "drizzle-kit": "^0.28.0",
     "tsx": "^4.19.0",

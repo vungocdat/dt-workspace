@@ -2,15 +2,15 @@ import { zValidator } from '@hono/zod-validator';
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
-import { sqlite } from '../db/client.js';
+import { exec, many, one } from '../db/client.js';
 import { renderMarkdown } from '../lib/markdown.js';
 import { requireAuth } from '../lib/session.js';
 
 /**
  * The calendar is a standalone feature, not a view over the knowledge base.
- * Its notes live in calendar_notes (created in initializeDb()) keyed by date —
- * they are not pages: no space, no parent, nothing in the sidebar tree, and no
- * FTS triggers. Creating a calendar note touches nothing else in the app.
+ * Its notes live in calendar_notes keyed by date — they are not pages: no
+ * space, no parent, nothing in the sidebar tree, and not in search. Creating a
+ * calendar note touches nothing else in the app.
  *
  * Dates are the *client's* local calendar dates. The server stores the ISO
  * string it is given verbatim and never derives one from a timestamp, which
@@ -30,36 +30,32 @@ interface NoteRow {
   updated_at: number;
 }
 
-// ── Prepared statements ──
+// ── SQL ──
 
-const stmtGetNote = sqlite.prepare<[string], NoteRow>(`
+const SQL_GET_NOTE = `
   SELECT date, content, content_html, created_at, updated_at
-  FROM calendar_notes WHERE date = ?
-`);
+  FROM calendar_notes WHERE date = $1
+`;
 
 // Range listing for one calendar view — content is deliberately not selected,
-// the grid only needs to know which days have a note.
-const stmtListNotesInRange = sqlite.prepare<
-  [string, string],
-  { date: string; updated_at: number }
->(`
+// the grid only needs to know which days have a note. All dates share the
+// YYYY-MM-DD shape (validated), so text comparison is date order.
+const SQL_LIST_NOTES_IN_RANGE = `
   SELECT date, updated_at FROM calendar_notes
-  WHERE date >= ? AND date <= ?
+  WHERE date >= $1 AND date <= $2
   ORDER BY date
-`);
+`;
 
-const stmtUpsertNote = sqlite.prepare(`
+const SQL_UPSERT_NOTE = `
   INSERT INTO calendar_notes (date, content, content_html, created_at, updated_at)
-  VALUES (@date, @content, @contentHtml, @now, @now)
-  ON CONFLICT(date) DO UPDATE SET
+  VALUES ($1, $2, $3, $4, $4)
+  ON CONFLICT (date) DO UPDATE SET
     content      = excluded.content,
     content_html = excluded.content_html,
     updated_at   = excluded.updated_at
-`);
+`;
 
-const stmtDeleteNote = sqlite.prepare<[string]>(
-  `DELETE FROM calendar_notes WHERE date = ?`,
-);
+const SQL_DELETE_NOTE = `DELETE FROM calendar_notes WHERE date = $1`;
 
 // ── Helpers ──
 
@@ -117,16 +113,19 @@ calendarRouter.use('*', requireAuth);
  * Declared before /notes/:date so the literal path wins in Hono's
  * declaration-order matching.
  */
-calendarRouter.get('/notes', zValidator('query', rangeQuerySchema), (c) => {
+calendarRouter.get('/notes', zValidator('query', rangeQuerySchema), async (c) => {
   const { from, to } = c.req.valid('query');
-  const rows = stmtListNotesInRange.all(from, to);
+  const rows = await many<{ date: string; updated_at: number }>(SQL_LIST_NOTES_IN_RANGE, [
+    from,
+    to,
+  ]);
   return c.json(rows.map((r) => ({ date: r.date, updatedAt: r.updated_at })));
 });
 
 // GET /notes/:date — one note, or 404 if that day has none
-calendarRouter.get('/notes/:date', (c) => {
+calendarRouter.get('/notes/:date', async (c) => {
   const date = requireDateParam(c.req.param('date'));
-  const row = stmtGetNote.get(date);
+  const row = await one<NoteRow>(SQL_GET_NOTE, [date]);
   if (!row) throw new HTTPException(404, { message: 'No note for that date' });
   return c.json(toNote(row));
 });
@@ -139,27 +138,21 @@ calendarRouter.put('/notes/:date', zValidator('json', saveBodySchema), async (c)
   const date = requireDateParam(c.req.param('date'));
   const { content } = c.req.valid('json');
 
-  const existing = stmtGetNote.get(date);
+  const existing = await one(SQL_GET_NOTE, [date]);
   const contentHtml = content ? await renderMarkdown(content) : '';
 
-  stmtUpsertNote.run({
-    date,
-    content,
-    contentHtml,
-    now: Math.floor(Date.now() / 1000),
-  });
+  await exec(SQL_UPSERT_NOTE, [date, content, contentHtml, Math.floor(Date.now() / 1000)]);
 
-  const row = stmtGetNote.get(date);
+  const row = await one<NoteRow>(SQL_GET_NOTE, [date]);
   if (!row) throw new HTTPException(500, { message: 'Failed to save note' });
   return c.json(toNote(row), existing ? 200 : 201);
 });
 
 // DELETE /notes/:date — remove a day's note
-calendarRouter.delete('/notes/:date', (c) => {
+calendarRouter.delete('/notes/:date', async (c) => {
   const date = requireDateParam(c.req.param('date'));
-  if (!stmtGetNote.get(date)) {
+  if ((await exec(SQL_DELETE_NOTE, [date])) === 0) {
     throw new HTTPException(404, { message: 'No note for that date' });
   }
-  stmtDeleteNote.run(date);
   return c.body(null, 204);
 });

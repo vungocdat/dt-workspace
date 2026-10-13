@@ -4,66 +4,67 @@ import { HTTPException } from 'hono/http-exception';
 import JSZip from 'jszip';
 import { v4 as uuidv4 } from 'uuid';
 import { z } from 'zod';
-import { sqlite } from '../db/client.js';
+import { exec, many, one, withTransaction } from '../db/client.js';
 import type { Space } from '../db/schema.js';
 import { renderMarkdown } from '../lib/markdown.js';
 import { requireAuth } from '../lib/session.js';
 
-// ── Prepared statements (module-level, plans cached for the process) ──
+// ── SQL ──
 // The list also carries per-space stats for the knowledge-base landing cards:
 // page count and when any page in the space was last edited (NULL if empty).
-const stmtListSpaces = sqlite.prepare<[], SpaceListRow>(`
+// Grouping by the primary key lets Postgres select the other s.* columns.
+// id is the final tie-breaker: new spaces all start at sort_order 0.
+const SQL_LIST_SPACES = `
   SELECT s.id, s.name, s.description, s.icon, s.sort_order, s.created_at, s.updated_at,
          COUNT(p.id) AS page_count, MAX(p.updated_at) AS last_edited_at
   FROM spaces s
   LEFT JOIN pages p ON p.space_id = s.id
   GROUP BY s.id
-  ORDER BY s.sort_order, s.created_at
-`);
+  ORDER BY s.sort_order, s.created_at, s.id
+`;
 
-const stmtGetSpace = sqlite.prepare<[string], SpaceRow>(`
+const SQL_GET_SPACE = `
   SELECT id, name, description, icon, sort_order, created_at, updated_at
-  FROM spaces WHERE id = ?
-`);
+  FROM spaces WHERE id = $1
+`;
 
-const stmtInsertSpace = sqlite.prepare(`
+const SQL_INSERT_SPACE = `
   INSERT INTO spaces (id, name, description, icon, sort_order, created_at, updated_at)
-  VALUES (@id, @name, @description, @icon, @sortOrder, @now, @now)
-`);
+  VALUES ($1, $2, $3, $4, $5, $6, $6)
+`;
 
-const stmtDeleteSpace = sqlite.prepare<[string]>(`DELETE FROM spaces WHERE id = ?`);
+const SQL_DELETE_SPACE = `DELETE FROM spaces WHERE id = $1`;
 
 // Export: fetch all pages in a space ordered by sort_order so parents
 // generally precede children in the flat list (not guaranteed for all trees,
-// but the import loop handles arbitrary ordering via topological sort).
-const stmtGetSpacePages = sqlite.prepare<[string], SpacePageRow>(`
+// but the export loop handles arbitrary ordering via a topological pass).
+const SQL_GET_SPACE_PAGES = `
   SELECT id, title, content, parent_id, sort_order
   FROM pages
-  WHERE space_id = ?
-  ORDER BY sort_order ASC
-`);
+  WHERE space_id = $1
+  ORDER BY sort_order ASC, created_at, id
+`;
 
-// Import: insert a single page; mirrors stmtInsertPage in pages.ts but local
-// to this module to avoid cross-module prepared-statement sharing.
-const stmtInsertPageForImport = sqlite.prepare(`
+// Import: insert a single page; mirrors SQL_INSERT_PAGE in pages.ts but local
+// to this module to avoid cross-module coupling.
+const SQL_INSERT_PAGE_FOR_IMPORT = `
   INSERT INTO pages (id, space_id, parent_id, title, content, content_html,
                      sort_order, created_at, updated_at)
-  VALUES (@id, @spaceId, @parentId, @title, @content, @contentHtml,
-          @sortOrder, @now, @now)
-`);
+  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+`;
 
-const stmtTree = sqlite.prepare<[string, string], TreeRow>(`
+const SQL_TREE = `
   WITH RECURSIVE tree(id, title, parent_id, sort_order, depth) AS (
     SELECT id, title, parent_id, sort_order, 0
-    FROM pages WHERE space_id = ? AND parent_id IS NULL
+    FROM pages WHERE space_id = $1 AND parent_id IS NULL
     UNION ALL
     SELECT p.id, p.title, p.parent_id, p.sort_order, t.depth + 1
     FROM pages p JOIN tree t ON p.parent_id = t.id
-    WHERE p.space_id = ?
+    WHERE p.space_id = $1
   )
   SELECT id, title, parent_id, sort_order, depth FROM tree
-  ORDER BY depth, sort_order, title
-`);
+  ORDER BY depth, sort_order, title, id
+`;
 
 interface SpaceRow {
   id: string;
@@ -128,7 +129,8 @@ const updateSchema = z
     name: z.string().min(1).max(256).optional(),
     description: z.string().max(2000).optional(),
     icon: z.string().max(16).optional(),
-    sortOrder: z.number().int().optional(),
+    // sort_order is a Postgres integer; out-of-range values are bad input.
+    sortOrder: z.number().int().min(-2147483648).max(2147483647).optional(),
   })
   .refine((d) => Object.keys(d).length > 0, { message: 'No fields to update' });
 
@@ -137,75 +139,65 @@ export const spacesRouter = new Hono();
 spacesRouter.use('*', requireAuth);
 
 // GET / — list all spaces
-spacesRouter.get('/', (c) => {
-  const rows = stmtListSpaces.all();
+spacesRouter.get('/', async (c) => {
+  const rows = await many<SpaceListRow>(SQL_LIST_SPACES);
   return c.json(
     rows.map((r) => ({ ...toSpace(r), pageCount: r.page_count, lastEditedAt: r.last_edited_at })),
   );
 });
 
 // POST / — create a space
-spacesRouter.post('/', zValidator('json', createSchema), (c) => {
+spacesRouter.post('/', zValidator('json', createSchema), async (c) => {
   const body = c.req.valid('json');
   const id = uuidv4();
   const now = Math.floor(Date.now() / 1000);
 
-  stmtInsertSpace.run({
-    id,
-    name: body.name,
-    description: body.description ?? '',
-    icon: body.icon ?? '📁',
-    sortOrder: 0,
-    now,
-  });
+  await exec(SQL_INSERT_SPACE, [id, body.name, body.description ?? '', body.icon ?? '📁', 0, now]);
 
-  const row = stmtGetSpace.get(id);
+  const row = await one<SpaceRow>(SQL_GET_SPACE, [id]);
   if (!row) throw new HTTPException(500, { message: 'Failed to create space' });
   return c.json(toSpace(row), 201);
 });
 
 // PATCH /:id — update mutable fields
-spacesRouter.patch('/:id', zValidator('json', updateSchema), (c) => {
+spacesRouter.patch('/:id', zValidator('json', updateSchema), async (c) => {
   const id = c.req.param('id');
   const body = c.req.valid('json');
 
-  const existing = stmtGetSpace.get(id);
-  if (!existing) throw new HTTPException(404, { message: 'Space not found' });
+  if (!(await one(SQL_GET_SPACE, [id]))) {
+    throw new HTTPException(404, { message: 'Space not found' });
+  }
 
-  // Build a dynamic SET clause from only the provided fields.
+  // Build a dynamic SET clause from only the provided fields; column names are
+  // fixed strings here, every value is a bound parameter.
   const sets: string[] = [];
-  const params: Record<string, unknown> = { id, now: Math.floor(Date.now() / 1000) };
-  if (body.name !== undefined) {
-    sets.push('name = @name');
-    params.name = body.name;
-  }
-  if (body.description !== undefined) {
-    sets.push('description = @description');
-    params.description = body.description;
-  }
-  if (body.icon !== undefined) {
-    sets.push('icon = @icon');
-    params.icon = body.icon;
-  }
-  if (body.sortOrder !== undefined) {
-    sets.push('sort_order = @sortOrder');
-    params.sortOrder = body.sortOrder;
-  }
-  sets.push('updated_at = @now');
+  const params: unknown[] = [];
+  const set = (column: string, value: unknown) => {
+    params.push(value);
+    sets.push(`${column} = $${params.length}`);
+  };
+  if (body.name !== undefined) set('name', body.name);
+  if (body.description !== undefined) set('description', body.description);
+  if (body.icon !== undefined) set('icon', body.icon);
+  if (body.sortOrder !== undefined) set('sort_order', body.sortOrder);
+  set('updated_at', Math.floor(Date.now() / 1000));
+  params.push(id);
 
-  sqlite.prepare(`UPDATE spaces SET ${sets.join(', ')} WHERE id = @id`).run(params);
+  await exec(`UPDATE spaces SET ${sets.join(', ')} WHERE id = $${params.length}`, params);
 
-  const row = stmtGetSpace.get(id);
-  return c.json(toSpace(row!));
+  const row = await one<SpaceRow>(SQL_GET_SPACE, [id]);
+  if (!row) throw new HTTPException(404, { message: 'Space not found' });
+  return c.json(toSpace(row));
 });
 
 // DELETE /:id — delete space; pages cascade via FK (whole space going away)
-spacesRouter.delete('/:id', (c) => {
+spacesRouter.delete('/:id', async (c) => {
   const id = c.req.param('id');
-  const existing = stmtGetSpace.get(id);
-  if (!existing) throw new HTTPException(404, { message: 'Space not found' });
+  if (!(await one(SQL_GET_SPACE, [id]))) {
+    throw new HTTPException(404, { message: 'Space not found' });
+  }
 
-  stmtDeleteSpace.run(id);
+  await exec(SQL_DELETE_SPACE, [id]);
   return c.body(null, 204);
 });
 
@@ -502,38 +494,29 @@ spacesRouter.post('/import', async (c) => {
     }
   }
 
-  const importTxn = sqlite.transaction(() => {
-    stmtInsertSpace.run({
-      id: spaceId,
-      name: spaceName.slice(0, 256),
-      description: '',
-      icon: spaceIcon,
-      sortOrder: 0,
-      now,
-    });
-
-    for (const rp of renderedPages) {
-      stmtInsertPageForImport.run({
-        id: rp.newId,
-        spaceId,
-        parentId: rp.parentId,
-        title: rp.title,
-        content: rp.content,
-        contentHtml: rp.contentHtml,
-        sortOrder: rp.sortOrder,
-        now,
-      });
-    }
-  });
-
+  // Markdown was rendered above, outside the transaction, so the connection
+  // isn't held open while unified works. Space + pages land atomically.
   try {
-    importTxn();
+    await withTransaction(async (tx) => {
+      await exec(
+        SQL_INSERT_SPACE,
+        [spaceId, spaceName.slice(0, 256), '', spaceIcon, 0, now],
+        tx,
+      );
+      for (const rp of renderedPages) {
+        await exec(
+          SQL_INSERT_PAGE_FOR_IMPORT,
+          [rp.newId, spaceId, rp.parentId, rp.title, rp.content, rp.contentHtml, rp.sortOrder, now],
+          tx,
+        );
+      }
+    });
   } catch (err) {
     console.error('[import] transaction failed:', err);
     throw new HTTPException(500, { message: 'Failed to import space' });
   }
 
-  const space = stmtGetSpace.get(spaceId);
+  const space = await one<SpaceRow>(SQL_GET_SPACE, [spaceId]);
   if (!space) throw new HTTPException(500, { message: 'Failed to retrieve imported space' });
   return c.json(toSpace(space), 201);
 });
@@ -545,14 +528,14 @@ spacesRouter.post('/import', async (c) => {
 // no ambiguity in Hono) to keep declaration order semantically clear.
 spacesRouter.get('/:id/export', async (c) => {
   const id = c.req.param('id');
-  const spaceRow = stmtGetSpace.get(id);
+  const spaceRow = await one<SpaceRow>(SQL_GET_SPACE, [id]);
   if (!spaceRow) throw new HTTPException(404, { message: 'Space not found' });
 
-  const pages = stmtGetSpacePages.all(id);
+  const pages = await many<SpacePageRow>(SQL_GET_SPACE_PAGES, [id]);
 
   // Build a map from page id → its ZIP path (without .md extension) so we
   // can resolve child paths after the parent path is known.
-  // Pages from stmtGetSpacePages are ordered by sort_order ASC, which means
+  // Pages from SQL_GET_SPACE_PAGES are ordered by sort_order ASC, which means
   // parents generally come before their children, but that is not guaranteed
   // for all tree shapes. We therefore do a topological pass: iterate until
   // all pages are placed, skipping any page whose parent isn't resolved yet.
@@ -631,12 +614,13 @@ spacesRouter.get('/:id/export', async (c) => {
 });
 
 // GET /:id/tree — nested page tree for the space
-spacesRouter.get('/:id/tree', (c) => {
+spacesRouter.get('/:id/tree', async (c) => {
   const id = c.req.param('id');
-  const existing = stmtGetSpace.get(id);
-  if (!existing) throw new HTTPException(404, { message: 'Space not found' });
+  if (!(await one(SQL_GET_SPACE, [id]))) {
+    throw new HTTPException(404, { message: 'Space not found' });
+  }
 
-  const rows = stmtTree.all(id, id);
+  const rows = await many<TreeRow>(SQL_TREE, [id]);
 
   // Assemble flat rows into a nested structure. Rows arrive ordered by depth,
   // so a parent is always materialized before its children.

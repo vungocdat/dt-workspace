@@ -14,8 +14,8 @@ export const searchRouter = new Hono();
 searchRouter.use('*', requireAuth);
 
 // GET /?q=...&spaceId=... — full-text search across pages
-searchRouter.get('/', zValidator('query', searchSchema), (c) => {
+searchRouter.get('/', zValidator('query', searchSchema), async (c) => {
   const { q, spaceId } = c.req.valid('query');
-  const results = searchPages(q, spaceId);
+  const results = await searchPages(q, spaceId);
   return c.json(results);
 });

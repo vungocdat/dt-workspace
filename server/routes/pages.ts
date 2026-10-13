@@ -3,7 +3,7 @@ import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { v4 as uuidv4 } from 'uuid';
 import { z } from 'zod';
-import { sqlite } from '../db/client.js';
+import { exec, many, one, withTransaction } from '../db/client.js';
 import type { Page } from '../db/schema.js';
 import { renderMarkdown } from '../lib/markdown.js';
 import { requireAuth } from '../lib/session.js';
@@ -37,77 +37,83 @@ interface RecentRow {
   updated_at: number;
 }
 
-// ── Prepared statements ──
-const stmtGetPage = sqlite.prepare<[string], PageRow>(`
+// ── SQL ──
+// Every statement names its columns: pages.search_vector is internal and must
+// never reach a response.
+
+const SQL_GET_PAGE = `
   SELECT id, space_id, parent_id, title, content, content_html,
          sort_order, created_at, updated_at
-  FROM pages WHERE id = ?
-`);
+  FROM pages WHERE id = $1
+`;
 
-const stmtGetPageFull = sqlite.prepare<[string], PageRowFull>(`
+const SQL_GET_PAGE_FULL = `
   SELECT p.id, p.space_id, p.parent_id, p.title, p.content, p.content_html,
          p.sort_order, p.created_at, p.updated_at, s.name AS space_name
   FROM pages p JOIN spaces s ON p.space_id = s.id
-  WHERE p.id = ?
-`);
+  WHERE p.id = $1
+`;
 
-const stmtGetAncestors = sqlite.prepare<[string], AncestorRow>(`
+const SQL_GET_ANCESTORS = `
   WITH RECURSIVE anc(id, title, parent_id, lvl) AS (
     SELECT p.id, p.title, p.parent_id, 0
-    FROM pages p WHERE p.id = (SELECT parent_id FROM pages WHERE id = ?)
+    FROM pages p WHERE p.id = (SELECT parent_id FROM pages WHERE id = $1)
     UNION ALL
     SELECT p.id, p.title, p.parent_id, a.lvl + 1
     FROM pages p JOIN anc a ON p.id = a.parent_id
   )
   SELECT id, title FROM anc ORDER BY lvl DESC
-`);
+`;
 
-const stmtGetSpace = sqlite.prepare<[string], { id: string }>(
-  `SELECT id FROM spaces WHERE id = ?`,
-);
+const SQL_SPACE_EXISTS = `SELECT id FROM spaces WHERE id = $1`;
 
-const stmtInsertPage = sqlite.prepare(`
+const SQL_INSERT_PAGE = `
   INSERT INTO pages (id, space_id, parent_id, title, content, content_html,
                      sort_order, created_at, updated_at)
-  VALUES (@id, @spaceId, @parentId, @title, @content, @contentHtml,
-          @sortOrder, @now, @now)
-`);
+  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+`;
 
-const stmtRecent = sqlite.prepare<[], RecentRow>(`
+// id breaks ties so pages saved in the same second keep a stable order.
+const SQL_RECENT = `
   SELECT p.id, p.title, p.space_id, s.name AS space_name, p.updated_at
   FROM pages p JOIN spaces s ON p.space_id = s.id
-  ORDER BY p.updated_at DESC
+  ORDER BY p.updated_at DESC, p.id
   LIMIT 10
-`);
+`;
 
 // Re-parent children to the deleted page's parent, then delete the page.
-const stmtReparentChildren = sqlite.prepare<[string, string]>(`
+const SQL_REPARENT_CHILDREN = `
   UPDATE pages
-  SET parent_id = (SELECT parent_id FROM pages WHERE id = ?)
-  WHERE parent_id = ?
-`);
-const stmtDeletePage = sqlite.prepare<[string]>(`DELETE FROM pages WHERE id = ?`);
+  SET parent_id = (SELECT parent_id FROM pages WHERE id = $1)
+  WHERE parent_id = $1
+`;
+const SQL_DELETE_PAGE = `DELETE FROM pages WHERE id = $1`;
 
-const deletePageTxn = sqlite.transaction((id: string) => {
-  stmtReparentChildren.run(id, id);
-  stmtDeletePage.run(id);
-});
-
-const stmtUpdateDescendantsSpace = sqlite.prepare(`
+// The moved page and all its descendants. UNION (not UNION ALL) stops the
+// recursion even if the parent links ever form a cycle.
+const SQL_UPDATE_DESCENDANTS_SPACE = `
   WITH RECURSIVE descendants(id) AS (
-    SELECT id FROM pages WHERE id = ?
-    UNION ALL
+    SELECT id FROM pages WHERE id = $1
+    UNION
     SELECT p.id FROM pages p JOIN descendants d ON p.parent_id = d.id
   )
-  UPDATE pages SET space_id = ? WHERE id IN (SELECT id FROM descendants)
-`);
+  UPDATE pages SET space_id = $2 WHERE id IN (SELECT id FROM descendants)
+`;
 
-const crossSpaceMoveTxn = sqlite.transaction((id: string, targetSpaceId: string, parentId: string | null, sortOrder: number) => {
-  stmtUpdateDescendantsSpace.run(id, targetSpaceId);
-  sqlite.prepare(
-    `UPDATE pages SET parent_id = ?, sort_order = ?, updated_at = ? WHERE id = ?`
-  ).run(parentId, sortOrder, Math.floor(Date.now() / 1000), id);
-});
+const SQL_MOVE_PAGE = `
+  UPDATE pages SET parent_id = $1, sort_order = $2, updated_at = $3 WHERE id = $4
+`;
+
+async function getPageResponse(id: string) {
+  const row = await one<PageRowFull>(SQL_GET_PAGE_FULL, [id]);
+  if (!row) return undefined;
+  const ancestors = await many<AncestorRow>(SQL_GET_ANCESTORS, [id]);
+  return {
+    ...toPage(row),
+    spaceName: row.space_name,
+    ancestors: ancestors.map((a) => ({ id: a.id, title: a.title })),
+  };
+}
 
 function toPage(row: PageRow): Page {
   return {
@@ -139,7 +145,9 @@ const updateSchema = z
 
 const moveSchema = z.object({
   parentId: z.string().min(1).nullable(),
-  sortOrder: z.number().int().optional(),
+  // sort_order is a Postgres integer; out-of-range values are bad input (400),
+  // not a database error (500).
+  sortOrder: z.number().int().min(-2147483648).max(2147483647).optional(),
   spaceId: z.string().min(1).optional(),
 });
 
@@ -148,8 +156,8 @@ export const pagesRouter = new Hono();
 pagesRouter.use('*', requireAuth);
 
 // GET /recent — 10 most recently updated pages (declared before /:id)
-pagesRouter.get('/recent', (c) => {
-  const rows = stmtRecent.all();
+pagesRouter.get('/recent', async (c) => {
+  const rows = await many<RecentRow>(SQL_RECENT);
   return c.json(
     rows.map((r) => ({
       id: r.id,
@@ -162,26 +170,20 @@ pagesRouter.get('/recent', (c) => {
 });
 
 // GET /:id — full page with space name and ancestor chain
-pagesRouter.get('/:id', (c) => {
-  const id = c.req.param('id');
-  const row = stmtGetPageFull.get(id);
-  if (!row) throw new HTTPException(404, { message: 'Page not found' });
-  const ancestors = stmtGetAncestors.all(id);
-  return c.json({
-    ...toPage(row),
-    spaceName: row.space_name,
-    ancestors: ancestors.map((a) => ({ id: a.id, title: a.title })),
-  });
+pagesRouter.get('/:id', async (c) => {
+  const page = await getPageResponse(c.req.param('id'));
+  if (!page) throw new HTTPException(404, { message: 'Page not found' });
+  return c.json(page);
 });
 
 // POST / — create a page
 pagesRouter.post('/', zValidator('json', createSchema), async (c) => {
   const body = c.req.valid('json');
 
-  if (!stmtGetSpace.get(body.spaceId)) {
+  if (!(await one(SQL_SPACE_EXISTS, [body.spaceId]))) {
     throw new HTTPException(404, { message: 'Space not found' });
   }
-  if (body.parentId && !stmtGetPage.get(body.parentId)) {
+  if (body.parentId && !(await one(SQL_GET_PAGE, [body.parentId]))) {
     throw new HTTPException(404, { message: 'Parent page not found' });
   }
 
@@ -190,72 +192,78 @@ pagesRouter.post('/', zValidator('json', createSchema), async (c) => {
   const content = body.content ?? '';
   const contentHtml = content ? await renderMarkdown(content) : '';
 
-  stmtInsertPage.run({
+  await exec(SQL_INSERT_PAGE, [
     id,
-    spaceId: body.spaceId,
-    parentId: body.parentId ?? null,
-    title: body.title ?? 'Untitled',
+    body.spaceId,
+    body.parentId ?? null,
+    body.title ?? 'Untitled',
     content,
     contentHtml,
-    sortOrder: 0,
+    0,
     now,
-  });
+  ]);
 
-  const row = stmtGetPage.get(id);
+  const row = await one<PageRow>(SQL_GET_PAGE, [id]);
   if (!row) throw new HTTPException(500, { message: 'Failed to create page' });
   return c.json(toPage(row), 201);
 });
 
-// PATCH /:id — update title and/or content (re-render on content change)
+// PATCH /:id — update title and/or content (re-render on content change).
+// search_vector is a generated column, so the search index follows on its own.
 pagesRouter.patch('/:id', zValidator('json', updateSchema), async (c) => {
   const id = c.req.param('id');
   const body = c.req.valid('json');
 
-  const existing = stmtGetPage.get(id);
-  if (!existing) throw new HTTPException(404, { message: 'Page not found' });
+  if (!(await one(SQL_GET_PAGE, [id]))) {
+    throw new HTTPException(404, { message: 'Page not found' });
+  }
 
+  // Build the SET clause from only the provided fields; column names are
+  // fixed strings here, every value is a bound parameter.
   const sets: string[] = [];
-  const params: Record<string, unknown> = { id, now: Math.floor(Date.now() / 1000) };
+  const params: unknown[] = [];
+  const set = (column: string, value: unknown) => {
+    params.push(value);
+    sets.push(`${column} = $${params.length}`);
+  };
 
-  if (body.title !== undefined) {
-    sets.push('title = @title');
-    params.title = body.title;
-  }
+  if (body.title !== undefined) set('title', body.title);
   if (body.content !== undefined) {
-    sets.push('content = @content', 'content_html = @contentHtml');
-    params.content = body.content;
-    params.contentHtml = body.content ? await renderMarkdown(body.content) : '';
+    set('content', body.content);
+    set('content_html', body.content ? await renderMarkdown(body.content) : '');
   }
-  sets.push('updated_at = @now');
+  set('updated_at', Math.floor(Date.now() / 1000));
+  params.push(id);
 
-  sqlite.prepare(`UPDATE pages SET ${sets.join(', ')} WHERE id = @id`).run(params);
+  await exec(`UPDATE pages SET ${sets.join(', ')} WHERE id = $${params.length}`, params);
 
   // Same shape as GET /:id — the client swaps this into page state, so it must
   // carry spaceName and ancestors or the breadcrumb breaks.
-  const row = stmtGetPageFull.get(id);
-  const ancestors = stmtGetAncestors.all(id);
-  return c.json({
-    ...toPage(row!),
-    spaceName: row!.space_name,
-    ancestors: ancestors.map((a) => ({ id: a.id, title: a.title })),
-  });
+  const page = await getPageResponse(id);
+  if (!page) throw new HTTPException(404, { message: 'Page not found' });
+  return c.json(page);
 });
 
 // DELETE /:id — re-parent children up, then delete (transactional)
-pagesRouter.delete('/:id', (c) => {
+pagesRouter.delete('/:id', async (c) => {
   const id = c.req.param('id');
-  if (!stmtGetPage.get(id)) throw new HTTPException(404, { message: 'Page not found' });
+  if (!(await one(SQL_GET_PAGE, [id]))) {
+    throw new HTTPException(404, { message: 'Page not found' });
+  }
 
-  deletePageTxn(id);
+  await withTransaction(async (tx) => {
+    await exec(SQL_REPARENT_CHILDREN, [id], tx);
+    await exec(SQL_DELETE_PAGE, [id], tx);
+  });
   return c.body(null, 204);
 });
 
 // PATCH /:id/move — change parent and/or ordering, optionally across spaces
-pagesRouter.patch('/:id/move', zValidator('json', moveSchema), (c) => {
+pagesRouter.patch('/:id/move', zValidator('json', moveSchema), async (c) => {
   const id = c.req.param('id');
   const body = c.req.valid('json');
 
-  const existing = stmtGetPage.get(id);
+  const existing = await one<PageRow>(SQL_GET_PAGE, [id]);
   if (!existing) throw new HTTPException(404, { message: 'Page not found' });
 
   if (body.parentId === id) {
@@ -265,7 +273,7 @@ pagesRouter.patch('/:id/move', zValidator('json', moveSchema), (c) => {
   const targetSpaceId = body.spaceId ?? existing.space_id;
 
   if (body.parentId) {
-    const parent = stmtGetPage.get(body.parentId);
+    const parent = await one<PageRow>(SQL_GET_PAGE, [body.parentId]);
     if (!parent) throw new HTTPException(404, { message: 'Parent page not found' });
     if (parent.space_id !== targetSpaceId) {
       throw new HTTPException(400, { message: 'Parent page is in a different space' });
@@ -273,17 +281,19 @@ pagesRouter.patch('/:id/move', zValidator('json', moveSchema), (c) => {
   }
 
   const sortOrder = body.sortOrder ?? existing.sort_order;
+  const now = Math.floor(Date.now() / 1000);
 
   if (targetSpaceId !== existing.space_id) {
-    crossSpaceMoveTxn(id, targetSpaceId, body.parentId ?? null, sortOrder);
+    // The whole subtree changes space together, or not at all.
+    await withTransaction(async (tx) => {
+      await exec(SQL_UPDATE_DESCENDANTS_SPACE, [id, targetSpaceId], tx);
+      await exec(SQL_MOVE_PAGE, [body.parentId ?? null, sortOrder, now, id], tx);
+    });
   } else {
-    sqlite
-      .prepare(
-        `UPDATE pages SET parent_id = ?, sort_order = ?, updated_at = ? WHERE id = ?`,
-      )
-      .run(body.parentId, sortOrder, Math.floor(Date.now() / 1000), id);
+    await exec(SQL_MOVE_PAGE, [body.parentId, sortOrder, now, id]);
   }
 
-  const row = stmtGetPage.get(id);
-  return c.json(toPage(row!));
+  const row = await one<PageRow>(SQL_GET_PAGE, [id]);
+  if (!row) throw new HTTPException(404, { message: 'Page not found' });
+  return c.json(toPage(row));
 });
