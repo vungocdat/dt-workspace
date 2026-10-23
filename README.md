@@ -232,6 +232,8 @@ chmod 600 .env
 
 `.env` must stay writable by the app's user: changing the username or password in Settings rewrites it. `NODE_ENV=production` is required — without it the server only serves the API, not the web UI.
 
+The server listens on `127.0.0.1` only, so nginx is the sole way in and port 3000 stays unreachable from outside even without a firewall rule. Point nginx at `http://127.0.0.1:3000` as below. To listen on every interface instead, add `HOST=0.0.0.0` to `.env`.
+
 ### 3. Build and test-start
 
 ```sh
@@ -239,7 +241,7 @@ npm run build
 node server/dist/index.js
 ```
 
-You should see `dt-workspace API listening on http://0.0.0.0:3000`, and the `dt_workspace` database now has its tables. Stop it with Ctrl+C. (No `db:migrate` — the server migrates its own database on startup.)
+You should see `dt-workspace API listening on http://127.0.0.1:3000`, and the `dt_workspace` database now has its tables. Stop it with Ctrl+C. (No `db:migrate` — the server migrates its own database on startup.)
 
 ### 4. systemd
 
@@ -487,7 +489,7 @@ The script never writes to the SQLite file. If anything goes wrong it rolls back
 
 ```sh
 sudo systemctl start dt-workspace
-journalctl -u dt-workspace -n 20       # should end with: dt-workspace API listening on http://0.0.0.0:3000
+journalctl -u dt-workspace -n 20       # should end with: dt-workspace API listening on http://127.0.0.1:3000
 ```
 
 Open the app and check that your spaces and pages are there, that search finds something (try a word without its diacritics — search now ignores them), and that the calendar notes and to-dos are back.

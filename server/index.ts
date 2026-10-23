@@ -94,8 +94,8 @@ async function main(): Promise<void> {
     app.notFound((c) => c.json({ error: 'Not found' }, 404));
   }
 
-  const server = serve({ fetch: app.fetch, port: config.port, hostname: '0.0.0.0' }, (info) => {
-    console.log(`dt-workspace API listening on http://0.0.0.0:${info.port}`);
+  const server = serve({ fetch: app.fetch, port: config.port, hostname: config.host }, (info) => {
+    console.log(`dt-workspace API listening on http://${config.host}:${info.port}`);
   });
 
   // Graceful shutdown (systemd stop, Ctrl+C, tsx watch restarts): stop taking

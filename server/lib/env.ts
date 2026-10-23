@@ -12,6 +12,7 @@ export interface AppConfig {
   passwordHash: string;
   sessionSecret: string;
   port: number;
+  host: string;
   databaseUrl: string;
   isProduction: boolean;
 }
@@ -48,6 +49,9 @@ export function loadConfig(): AppConfig {
     passwordHash,
     sessionSecret,
     port: Number(process.env.PORT ?? 3000),
+    // Loopback by default: nginx is the only public entry point. HOST=0.0.0.0
+    // exposes the app on every interface.
+    host: process.env.HOST || '127.0.0.1',
     databaseUrl,
     isProduction: process.env.NODE_ENV === 'production',
   };
