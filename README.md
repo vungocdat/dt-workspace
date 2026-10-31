@@ -1,5 +1,7 @@
 # DT Workspace
 
+** THIS PROJECT HAS BEEN MOVED TO PERSONAL GITLAB. PROJECT IS NO LONGER MAINTAINED HERE **
+
 > **Warning:** This project is fully vibe coded. No formal testing, no security audit, no production hardening. Use at your own risk.
 
 A self-hosted, single-user workspace where every page is stored as raw Markdown. Built for sysadmins and developers who want a fast, private place to keep code snippets, tech notes, and learning journals — backed by a single PostgreSQL database.
